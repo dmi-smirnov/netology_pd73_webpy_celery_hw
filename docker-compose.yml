@@ -1,0 +1,8 @@
+networks:
+  net:
+
+services:
+  redis:
+    image: redis
+    ports:
+      - ${REDIS_HOST_PORT}:6379
