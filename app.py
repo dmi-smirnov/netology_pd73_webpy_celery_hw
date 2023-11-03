@@ -1,6 +1,6 @@
 from functools import cache
-import os
-import uuid
+import io
+import numpy
 
 import flask
 from flask import Flask, request
@@ -13,7 +13,6 @@ APP_NAME = __name__
 REDIS_HOST_PORT = '6379'
 CELERY_BROKER = f'redis://127.0.0.1:{REDIS_HOST_PORT}/1'
 CELERY_BACKEND = f'redis://127.0.0.1:{REDIS_HOST_PORT}/2'
-FILES_DIR_PATH = 'files'
 MODEL_FILE_PATH = 'EDSR_x2.pb'
 OUTPUT_FILES_ROUTE = 'processed/'
 HTTP_SRV_URL = 'http://127.0.0.1:5000/'
@@ -40,19 +39,18 @@ def get_scaler():
     return scaler
 
 @celery.task
-def upscale_task(input_img_file_path: str) -> str:
-    image = cv2.imread(input_img_file_path)
+def upscale_task(input_img_bytes: bytes, img_file_extension: str) -> tuple[bytes, str]:
+    input_img_numpy_array =\
+        numpy.asarray(bytearray(input_img_bytes), dtype='uint8')
+    image = cv2.imdecode(input_img_numpy_array, cv2.IMREAD_COLOR)
+
     result = get_scaler().upsample(image)
-    img_file_extension = input_img_file_path.split('.')[-1]
-    output_img_file_name = f'{uuid.uuid4()}.{img_file_extension}'
-    output_img_file_path = os.path.join(FILES_DIR_PATH, output_img_file_name)
-    cv2.imwrite(output_img_file_path, result)
 
-    os.remove(input_img_file_path)
+    output_img_encode = cv2.imencode('.png', result)[1]
+    output_img_data_encode = numpy.array(output_img_encode)
+    output_img_bytes = output_img_data_encode.tobytes()
 
-    output_img_url =\
-        HTTP_SRV_URL + OUTPUT_FILES_ROUTE + output_img_file_name
-    return output_img_url
+    return (output_img_bytes, img_file_extension)
 
 @app.route('/upscale/', methods=['POST'])
 def upscale():
@@ -67,26 +65,40 @@ def upscale():
     if not img_file_name:
         return '', 400
     img_file_extension = img_file_name.split('.')[-1]
-    img_file_name = f'{uuid.uuid4()}.{img_file_extension}'
-    img_file_path = os.path.join(FILES_DIR_PATH, img_file_name)
-    if not os.path.exists(FILES_DIR_PATH):
-        os.makedirs(FILES_DIR_PATH)
-    img.save(img_file_path)
 
-    task = upscale_task.delay(img_file_path)
+    task = upscale_task.delay(img.read(), img_file_extension)
+
     return {'task_id': task.id}
 
 @app.route('/tasks/<task_id>/', methods=['GET'])
 def get_task(task_id: str):
     task = CeleryAsyncResult(task_id, app=celery)
+
+    if task.status == 'SUCCESS' and task.result:
+        task_result =\
+            f'{HTTP_SRV_URL}{OUTPUT_FILES_ROUTE}{task_id}.{task.result[1]}'
+    else:
+        task_result = task.result
+
     return {
-        'status': task.state,
-        'result': task.result
+        'status': task.status,
+        'result': task_result
     }
 
 @app.route(f'/{OUTPUT_FILES_ROUTE}<file_name>', methods=['GET'])
 def get_file(file_name: str):
-    try:
-        return flask.send_from_directory(FILES_DIR_PATH, file_name)
-    except FileNotFoundError:
+    file_name_split = file_name.split('.')
+    if len(file_name_split) != 2:
         return '', 404
+    
+    task_id = file_name_split[0]
+    task = CeleryAsyncResult(task_id, app=celery)
+
+    if not task.status == 'SUCCESS' or not task.result:
+        return '', 404
+
+    img_bytes = task.result[0]
+    return flask.send_file(
+        io.BytesIO(img_bytes),
+        download_name=file_name
+    )
