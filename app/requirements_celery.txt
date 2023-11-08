@@ -1,6 +1,5 @@
-flask
 celery
 redis
 opencv-contrib-python==4.6.0.66
 opencv-python==4.6.0.66
-gunicorn
+numpy

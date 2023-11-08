@@ -4,5 +4,41 @@ networks:
 services:
   redis:
     image: redis
+    networks:
+      - net
+
+  celery:
+    build:
+      context: .
+      dockerfile: celery.dockerfile
+    networks:
+      - net
+    environment:
+      - APP_NAME=${APP_NAME}
+      - REDIS_ADDR=redis
+    depends_on:
+      - redis
+
+  gunicorn_flask:
+    build:
+      context: .
+      dockerfile: flask_gunicorn.dockerfile
+    networks:
+      - net
+    environment:
+      - APP_NAME=${APP_NAME}
+      - REDIS_ADDR=redis
+      - HTTP_SRV_URL=${HTTP_SRV_URL}
+    depends_on:
+      - celery
+
+  nginx:
+    image: nginx
+    volumes:
+      - ./nginx_templates:/etc/nginx/templates:ro
+    networks:
+      - net
     ports:
-      - ${REDIS_HOST_PORT}:6379
+      - ${NGINX_HOST_ADDR_PORT}:80
+    depends_on:
+      - gunicorn_flask
